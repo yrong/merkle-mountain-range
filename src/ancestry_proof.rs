@@ -5,6 +5,7 @@ use crate::helper::{
 };
 pub use crate::mmr::bagging_peaks_hashes;
 use crate::mmr::take_while_vec;
+use crate::util::VeqDequeExt;
 use crate::vec::Vec;
 use crate::{Error, Merge, Result};
 use core::fmt::Debug;
@@ -353,6 +354,106 @@ fn calculate_root<
 ) -> Result<T> {
     let peaks_hashes = calculate_peaks_hashes::<_, M, _>(nodes, mmr_size, proof_iter)?;
     bagging_peaks_hashes::<_, M>(peaks_hashes)
+}
+
+/// The positions of the items `MMR::gen_ancestry_proof(prev_mmr_size)` emits for an MMR of
+/// `mmr_size` nodes, in proof order — the exact positions its `prev_peaks_proof` carries, including
+/// the single item that stands for a bagged run of right-hand peaks.
+///
+/// An MMR's shape is fixed by its size, so this is a pure function of the two sizes and needs no
+/// store. A verifier that receives an ancestry proof as bare hashes can re-derive their positions
+/// with it and hand `(position, hash)` pairs to [`NodeMerkleProof`]; a prover can size and lay out a
+/// proof before touching storage.
+///
+/// Errors as `gen_ancestry_proof` does: `prev_mmr_size` must describe a non-empty MMR whose peaks all
+/// lie within `mmr_size`.
+pub fn ancestry_proof_positions(prev_mmr_size: u64, mmr_size: u64) -> Result<Vec<u64>> {
+    let mut pos_list = get_peaks(prev_mmr_size);
+    if pos_list.is_empty() {
+        return Err(Error::GenProofForInvalidNodes);
+    }
+    if mmr_size == 1 && pos_list == [0] {
+        return Ok(Vec::new());
+    }
+    pos_list.sort_unstable();
+    pos_list.dedup();
+    let mut positions: Vec<u64> = Vec::new();
+    let mut bagging_track = 0;
+    for peak_pos in get_peaks(mmr_size) {
+        let pos_list: Vec<_> = take_while_vec(&mut pos_list, |&pos| pos <= peak_pos);
+        if pos_list.is_empty() {
+            bagging_track += 1;
+        } else {
+            bagging_track = 0;
+        }
+        node_proof_positions_for_peak(&mut positions, pos_list, peak_pos);
+    }
+    if !pos_list.is_empty() {
+        return Err(Error::GenProofForInvalidNodes);
+    }
+    // A trailing run of peaks with nothing to prove beneath them is bagged into one item, which
+    // takes the position of the first of them.
+    if bagging_track > 1 {
+        positions.truncate(positions.len() - bagging_track + 1);
+    }
+    positions.sort_unstable();
+    Ok(positions)
+}
+
+/// The positions a node proof for `pos_list` under the peak at `peak_pos` consists of, appended to
+/// `positions`: the store-free half of `MMR::gen_node_proof_for_peak`, which fetches exactly these.
+pub(crate) fn node_proof_positions_for_peak(
+    positions: &mut Vec<u64>,
+    pos_list: Vec<u64>,
+    peak_pos: u64,
+) {
+    // Nothing to prove if the position itself is the peak.
+    if pos_list.len() == 1 && pos_list == [peak_pos] {
+        return;
+    }
+    // The peak root stands in when no positions beneath it are proven.
+    if pos_list.is_empty() {
+        positions.push(peak_pos);
+        return;
+    }
+
+    let mut queue: VecDeque<_> = VecDeque::new();
+    for value in pos_list.iter().map(|pos| (pos_height_in_tree(*pos), *pos)) {
+        queue.insert_sorted(value);
+    }
+
+    while let Some((height, pos)) = queue.pop_front() {
+        debug_assert!(pos <= peak_pos);
+        if pos == peak_pos {
+            if queue.is_empty() {
+                break;
+            } else {
+                continue;
+            }
+        }
+
+        let (sib_pos, parent_pos) = {
+            let next_height = pos_height_in_tree(pos + 1);
+            let sibling_offset = sibling_offset(height);
+            if next_height > height {
+                // `pos` is a right sibling
+                (pos - sibling_offset, pos + 1)
+            } else {
+                // `pos` is a left sibling
+                (pos + sibling_offset, pos + parent_offset(height))
+            }
+        };
+
+        if Some(&sib_pos) == queue.front().map(|(_, pos)| pos) {
+            // The sibling is itself being proven; drop it.
+            queue.pop_front();
+        } else {
+            positions.push(sib_pos);
+        }
+        if parent_pos < peak_pos {
+            queue.insert_sorted((height + 1, parent_pos));
+        }
+    }
 }
 
 pub fn expected_ancestry_proof_size(prev_mmr_size: u64, mmr_size: u64) -> usize {

@@ -4,7 +4,7 @@
 //! https://github.com/mimblewimble/grin/blob/master/doc/mmr.md#structure
 //! https://github.com/mimblewimble/grin/blob/0ff6763ee64e5a14e70ddd4642b99789a1648a32/core/src/core/pmmr.rs#L606
 
-use crate::ancestry_proof::{AncestryProof, NodeMerkleProof};
+use crate::ancestry_proof::{node_proof_positions_for_peak, AncestryProof, NodeMerkleProof};
 use crate::borrow::Cow;
 use crate::collections::VecDeque;
 use crate::helper::{
@@ -12,7 +12,6 @@ use crate::helper::{
     parent_offset, pos_height_in_tree, sibling_offset,
 };
 use crate::mmr_store::{MMRBatch, MMRStoreReadOps, MMRStoreWriteOps};
-use crate::util::VeqDequeExt;
 use crate::vec;
 use crate::vec::Vec;
 use crate::{Error, Merge, Result};
@@ -226,67 +225,15 @@ impl<T: Clone + PartialEq, M: Merge<Item = T>, S: MMRStoreReadOps<T>> MMR<T, M, 
         pos_list: Vec<u64>,
         peak_pos: u64,
     ) -> Result<()> {
-        // do nothing if position itself is the peak
-        if pos_list.len() == 1 && pos_list == [peak_pos] {
-            return Ok(());
-        }
-        // take peak root from store if no positions need to be proven
-        if pos_list.is_empty() {
+        // Which nodes the proof needs is a function of positions alone; only fetching them
+        // touches the store.
+        let mut positions = Vec::new();
+        node_proof_positions_for_peak(&mut positions, pos_list, peak_pos);
+        for pos in positions {
             proof.push((
-                peak_pos,
-                self.batch
-                    .get_elem(peak_pos)?
-                    .ok_or(Error::InconsistentStore)?,
+                pos,
+                self.batch.get_elem(pos)?.ok_or(Error::InconsistentStore)?,
             ));
-            return Ok(());
-        }
-
-        let mut queue: VecDeque<_> = VecDeque::new();
-        for value in pos_list.iter().map(|pos| (pos_height_in_tree(*pos), *pos)) {
-            queue.insert_sorted(value);
-        }
-
-        // Generate sub-tree merkle proof for positions
-        while let Some((height, pos)) = queue.pop_front() {
-            debug_assert!(pos <= peak_pos);
-            if pos == peak_pos {
-                if queue.is_empty() {
-                    break;
-                } else {
-                    continue;
-                }
-            }
-
-            // calculate sibling
-            let (sib_pos, parent_pos) = {
-                let next_height = pos_height_in_tree(pos + 1);
-                let sibling_offset = sibling_offset(height);
-                if next_height > height {
-                    // implies pos is right sibling
-                    (pos - sibling_offset, pos + 1)
-                } else {
-                    // pos is left sibling
-                    (pos + sibling_offset, pos + parent_offset(height))
-                }
-            };
-
-            if Some(&sib_pos) == queue.front().map(|(_, pos)| pos) {
-                // drop sibling
-                queue.pop_front();
-            } else {
-                let sibling = (
-                    sib_pos,
-                    self.batch
-                        .get_elem(sib_pos.clone())?
-                        .ok_or(Error::InconsistentStore)?,
-                );
-
-                proof.push(sibling);
-            }
-            if parent_pos < peak_pos {
-                // save pos to tree buf
-                queue.insert_sorted((height + 1, parent_pos));
-            }
         }
         Ok(())
     }
