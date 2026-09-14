@@ -365,9 +365,15 @@ fn calculate_root<
 /// with it and hand `(position, hash)` pairs to [`NodeMerkleProof`]; a prover can size and lay out a
 /// proof before touching storage.
 ///
-/// Errors as `gen_ancestry_proof` does: `prev_mmr_size` must describe a non-empty MMR whose peaks all
-/// lie within `mmr_size`.
+/// Both arguments must be valid MMR sizes (`CorruptedProof` otherwise, as the verifiers report it),
+/// and `prev_mmr_size` must describe a non-empty MMR whose peaks all lie within `mmr_size`
+/// (`GenProofForInvalidNodes`, as `gen_ancestry_proof` reports it). Sizes are not bounded here: the
+/// position arithmetic is the generator's, so a caller deriving positions from untrusted sizes
+/// should cap them, as it would before generating.
 pub fn ancestry_proof_positions(prev_mmr_size: u64, mmr_size: u64) -> Result<Vec<u64>> {
+    if !is_valid_mmr_size(prev_mmr_size) || !is_valid_mmr_size(mmr_size) {
+        return Err(Error::CorruptedProof);
+    }
     let mut pos_list = get_peaks(prev_mmr_size);
     if pos_list.is_empty() {
         return Err(Error::GenProofForInvalidNodes);

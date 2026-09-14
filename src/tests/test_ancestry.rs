@@ -2,6 +2,7 @@ use super::{MergeNumberHash, NumberHash};
 use crate::ancestry_proof::{ancestry_proof_positions, expected_ancestry_proof_size};
 use crate::leaf_index_to_mmr_size;
 use crate::util::{MemMMR, MemStore};
+use crate::Error;
 
 #[test]
 fn test_ancestry() {
@@ -69,4 +70,13 @@ fn test_ancestry_proof_positions_rejects_what_gen_ancestry_proof_rejects() {
     assert!(ancestry_proof_positions(7, 4).is_err());
     // The single-leaf identity case: nothing to prove.
     assert_eq!(ancestry_proof_positions(1, 1).unwrap(), Vec::<u64>::new());
+    // Sizes that are not MMR sizes are rejected the way the verifiers reject them.
+    assert!(matches!(
+        ancestry_proof_positions(2, 7),
+        Err(Error::CorruptedProof)
+    ));
+    assert!(matches!(
+        ancestry_proof_positions(3, 5),
+        Err(Error::CorruptedProof)
+    ));
 }
