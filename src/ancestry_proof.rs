@@ -362,24 +362,44 @@ fn calculate_root<
 ///
 /// An MMR's shape is fixed by its size, so this is a pure function of the two sizes and needs no
 /// store. A verifier that receives an ancestry proof as bare hashes can re-derive their positions
-/// with it and hand `(position, hash)` pairs to [`NodeMerkleProof`]; a prover can size and lay out a
-/// proof before touching storage.
+/// with it and hand `(position, hash)` pairs to [`NodeMerkleProof`].
 ///
-/// Both arguments must be valid MMR sizes (`CorruptedProof` otherwise, as the verifiers report it),
-/// and `prev_mmr_size` must describe a non-empty MMR whose peaks all lie within `mmr_size`
-/// (`GenProofForInvalidNodes`, as `gen_ancestry_proof` reports it). Sizes are not bounded here: the
-/// position arithmetic is the generator's, so a caller deriving positions from untrusted sizes
-/// should cap them, as it would before generating.
+/// Verifier-facing, so both arguments are checked to be valid MMR sizes (`CorruptedProof`
+/// otherwise, as the verifiers report it); `gen_ancestry_proof` shares the layout below but not
+/// this check. `prev_mmr_size` must describe a non-empty MMR whose peaks all lie within `mmr_size`
+/// (`GenProofForInvalidNodes`). Sizes are not bounded here: a caller deriving positions from
+/// untrusted sizes should cap them, as it would before generating.
 pub fn ancestry_proof_positions(prev_mmr_size: u64, mmr_size: u64) -> Result<Vec<u64>> {
     if !is_valid_mmr_size(prev_mmr_size) || !is_valid_mmr_size(mmr_size) {
         return Err(Error::CorruptedProof);
     }
+    let (mut positions, bagged) = ancestry_proof_layout(prev_mmr_size, mmr_size)?;
+    // The generator bags a trailing run of right-hand peaks into one item that takes the position
+    // of the first of them.
+    if bagged > 1 {
+        positions.truncate(positions.len() - bagged + 1);
+    }
+    positions.sort_unstable();
+    Ok(positions)
+}
+
+/// The proof-item positions of an ancestry proof, in emission order and before the right-hand
+/// bagging, plus the length of the trailing run of new-MMR peaks with nothing proven beneath them
+/// (`0` or `1` means nothing is bagged). `gen_ancestry_proof` fetches these positions from the
+/// store and bags the run; [`ancestry_proof_positions`] collapses it to its first position.
+///
+/// Errors as `gen_ancestry_proof` always has: `GenProofForInvalidNodes` for an empty previous MMR
+/// or one whose peaks do not all lie within `mmr_size`.
+pub(crate) fn ancestry_proof_layout(
+    prev_mmr_size: u64,
+    mmr_size: u64,
+) -> Result<(Vec<u64>, usize)> {
     let mut pos_list = get_peaks(prev_mmr_size);
     if pos_list.is_empty() {
         return Err(Error::GenProofForInvalidNodes);
     }
     if mmr_size == 1 && pos_list == [0] {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
     pos_list.sort_unstable();
     pos_list.dedup();
@@ -397,13 +417,7 @@ pub fn ancestry_proof_positions(prev_mmr_size: u64, mmr_size: u64) -> Result<Vec
     if !pos_list.is_empty() {
         return Err(Error::GenProofForInvalidNodes);
     }
-    // A trailing run of peaks with nothing to prove beneath them is bagged into one item, which
-    // takes the position of the first of them.
-    if bagging_track > 1 {
-        positions.truncate(positions.len() - bagging_track + 1);
-    }
-    positions.sort_unstable();
-    Ok(positions)
+    Ok((positions, bagging_track))
 }
 
 /// The positions a node proof for `pos_list` under the peak at `peak_pos` consists of, appended to
