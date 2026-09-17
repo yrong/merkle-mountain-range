@@ -349,9 +349,9 @@ impl<T: Clone + PartialEq, M: Merge<Item = T>, S: MMRStoreReadOps<T>> MMR<T, M, 
             });
         }
         // Which nodes the proof needs is a function of the two sizes alone; only fetching them
-        // touches the store.
-        let (positions, bagged) = ancestry_proof_layout(prev_mmr_size, self.mmr_size)?;
-        let mut proof: Vec<(u64, T)> = Vec::with_capacity(positions.len());
+        // touches the store. `bagged_run` is the trailing right-hand peaks the proof collapses.
+        let (positions, bagged_run) = ancestry_proof_layout(prev_mmr_size, self.mmr_size)?;
+        let mut proof: Vec<(u64, T)> = Vec::with_capacity(positions.len() + 1);
         for pos in positions {
             proof.push((
                 pos,
@@ -359,16 +359,16 @@ impl<T: Clone + PartialEq, M: Merge<Item = T>, S: MMRStoreReadOps<T>> MMR<T, M, 
             ));
         }
 
-        // starting from the rightmost peak, an unbroken sequence of
-        // peaks that don't have descendants to be proven can be bagged
-        // during the proof construction already since during verification,
-        // they'll only be utilized during the bagging step anyway
-        if bagged > 1 {
-            let rhs_peaks = proof.split_off(proof.len() - bagged);
+        // The bagged run is combined during construction; at verification its hashes are only
+        // used in the final bagging step anyway. The combined item takes the run's first position.
+        if let Some(&first) = bagged_run.first() {
+            let hashes = bagged_run
+                .iter()
+                .map(|&pos| self.batch.get_elem(pos)?.ok_or(Error::InconsistentStore))
+                .collect::<Result<Vec<_>>>()?;
             proof.push((
-                rhs_peaks[0].0,
-                self.bag_rhs_peaks(rhs_peaks.iter().map(|(_pos, item)| item.clone()).collect())?
-                    .expect("bagging rhs peaks"),
+                first,
+                self.bag_rhs_peaks(hashes)?.expect("bagging rhs peaks"),
             ));
         }
 
